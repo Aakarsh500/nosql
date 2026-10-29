@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Polyglot Commerce · Dashboard</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<main class="page">
+  <div class="panel-head"><div><h2 style="font-size:20px">Review dashboard</h2>
+    <span class="muted">Database ownership, latency, consistency state and the outbox → Neo4j projection, live.</span></div>
+    <div class="row"><label class="row" style="margin:0;gap:4px"><input type="checkbox" id="auto" checked style="width:auto"> auto-refresh 3 s</label>
+      <button class="secondary" id="refresh">Refresh</button></div></div>
+
+  <div class="cols-3" id="health" style="margin-bottom:16px"></div>
+
+  <div class="cols-4" style="margin-bottom:16px">
+    <div class="kpi"><div class="label">Outbox backlog</div><div class="value" id="k-backlog">—</div><div class="sub" id="k-backlog-sub"></div></div>
+    <div class="kpi"><div class="label">Oldest pending event</div><div class="value" id="k-oldest">—</div><div class="sub" id="k-oldest-sub"></div></div>
+    <div class="kpi"><div class="label">Projection lag (last 100)</div><div class="value" id="k-lag">—</div><div class="sub" id="k-lag-sub"></div></div>
+    <div class="kpi"><div class="label">Projector worker</div><div class="value" id="k-worker">—</div><div class="sub" id="k-worker-sub"></div></div>
+  </div>
+
+  <div class="cols-2">
+    <section class="panel">
+      <div class="panel-head"><h2>Latency by flow (p95 vs. target)</h2><button class="ghost sm" id="reset">Reset</button></div>
+      <div class="table-wrap"><table id="flows"></table></div>
+      <div class="section-title">Latency by store (per operation)</div>
+      <div class="table-wrap"><table id="stores"></table></div>
+      <p class="muted small" id="metrics-note"></p>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>Who owns what</h2></div>
+      <table>
+        <tr><th>Flow</th><th>Store</th><th>Access pattern</th><th>Consistency</th></tr>
+        <tr><td>Session</td><td><span class="badge redis">Redis</span> </td><td>key lookup <code>sess:{id}</code>, sliding TTL</td><td>immediate</td></tr>
+        <tr><td>Cart</td><td><span class="badge redis">Redis</span> </td><td>hash <code>cart:{id}</code>, atomic Lua HINCRBY</td><td>immediate</td></tr>
+        <tr><td>Browse / search</td><td><span class="badge mongo">MongoDB</span> </td><td>indexed find on documents</td><td>immediate</td></tr>
+        <tr><td>Checkout</td><td><span class="badge mongo">MongoDB</span> </td><td>transaction: order + outbox</td><td>authoritative</td></tr>
+        <tr><td>Cart cleanup</td><td><span class="badge redis">Redis</span> </td><td>DEL after commit</td><td>best effort</td></tr>
+        <tr><td>Graph projection</td><td><span class="badge neo4j">Neo4j</span> </td><td>MERGE from outbox</td><td>eventual (≤ 5 s target)</td></tr>
+        <tr><td>Recommendation</td><td><span class="badge neo4j">Neo4j</span> <span class="badge mongo">MongoDB</span> </td><td>2-hop traversal + hydrate</td><td>may lag</td></tr>
+      </table>
+    </section>
+  </div>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Outbox events <span class="badge mongo">MongoDB · outbox</span> → <span class="badge neo4j">Neo4j</span></h2>
+      <div class="row"><select id="status" style="width:auto"><option value="">All statuses</option><option>PENDING</option><option>PROCESSING</option><option>PROCESSED</option><option>DEAD</option></select>
+        <button class="secondary" id="project">Run projector now</button><button class="danger" id="retry-dead">Retry dead letters</button></div></div>
+    <div class="table-wrap"><table id="events"></table></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Recent requests (correlation IDs)</h2><span class="muted small">Storefront/admin traffic; dashboard polling is excluded</span></div>
+    <div class="table-wrap"><table id="requests"></table></div>
+  </section>
+</main>
+<script src="/static/common.js"></script>
+<script>
+renderNav('dashboard');
+
+const fmtS = v => v == null ? '—' : (v < 1 ? `${Math.round(v * 1000)} ms` : `${v.toFixed(1)} s`);
+
+async function refresh() {
+  const [h, summary, metrics, events, reqs] = await Promise.all([
+    api('/api/health', { quiet: true }).catch(() => null),
+    api('/api/admin/outbox/summary', { quiet: true }).catch(e => ({ error: e.message })),
+    api('/api/admin/metrics', { quiet: true }).catch(() => null),
+    api('/api/admin/outbox?limit=40' + ($('#status').value ? '&status=' + $('#status').value : ''), { quiet: true }).catch(() => []),
+    api('/api/admin/traces?limit=25', { quiet: true }).catch(() => []),
+  ]);
+  // health
+  $('#health').innerHTML = ['redis', 'mongo', 'neo4j'].map(s => {
+    const x = h?.stores?.[s];
+    return `<div class="kpi"><div class="row between"><b>${STORE_LABEL[s]}</b>${x?.ok ? '<span class="badge ok">UP</span>' : '<span class="badge bad">DOWN</span>'}</div>
+      <div class="sub">${x ? (x.ok ? `${esc(x.version || '')} ${x.replica_set ? '· replica set ' + esc(x.replica_set) : ''} · ping ${x.ms} ms` : esc(x.error)) : 'API unreachable'}</div></div>`;
+  }).join('');
+  // outbox KPIs
+  if (summary && !summary.error) {
+    const c = summary.counts;
+    $('#k-backlog').textContent = summary.backlog;
+    $('#k-backlog-sub').innerHTML = `${c.PROCESSED} processed · ${c.PENDING} pending · ${c.PROCESSING} in flight · <b style="color:var(--danger)">${c.DEAD} dead</b>`;
+    $('#k-oldest').textContent = summary.backlog ? fmtS(summary.oldest_pending_age_s) : '0';
+    $('#k-oldest-sub').innerHTML = summary.updating ? `<span class="badge warn">over ${summary.lag_target_s}s target · recommendations updating</span>` : `<span class="badge ok">within ${summary.lag_target_s}s target</span>`;
+    $('#k-lag').textContent = fmtS(summary.recent_lag_avg_s);
+    $('#k-lag-sub').textContent = `avg · p95 ${fmtS(summary.recent_lag_p95_s)} (commit → graph)`;
+    const w = summary.worker;
+    const alive = w && w.heartbeat_age_s != null && w.heartbeat_age_s < 10;
+    $('#k-worker').innerHTML = alive ? '<span style="color:var(--ok)">running</span>' : '<span style="color:var(--danger)">no heartbeat</span>';
+    $('#k-worker-sub').textContent = w ? `heartbeat ${w.heartbeat_age_s}s ago · ${w.processed_total || 0} projected, ${w.failed_total || 0} failed attempts${w.last_batch?.error ? ' · last error: ' + w.last_batch.error.slice(0, 60) : ''}` : 'worker has not reported yet';
+  }
+  // metrics
+  if (metrics) {
+    $('#flows').innerHTML = '<tr><th>Flow</th><th class="num">Requests</th><th class="num">p50</th><th class="num">p95</th><th class="num">Target</th><th></th></tr>' +
+      Object.entries(metrics.flows).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${v.count}</td><td class="num">${v.p50_ms ?? '—'} ms</td><td class="num">${v.p95_ms ?? '—'} ms</td>
+      <td class="num">${v.target_p95_ms ? v.target_p95_ms + ' ms' : '—'}</td><td>${v.meets_target == null ? '' : v.meets_target ? '<span class="badge ok">meets</span>' : '<span class="badge bad">misses</span>'}</td></tr>`).join('');
+    $('#stores').innerHTML = '<tr><th>Store</th><th class="num">Operations</th><th class="num">p50</th><th class="num">p95</th><th class="num">max</th></tr>' +
+      Object.entries(metrics.stores).map(([k, v]) => `<tr><td>${storeBadge(k)}</td><td class="num">${v.count}</td><td class="num">${v.p50_ms} ms</td><td class="num">${v.p95_ms} ms</td><td class="num">${v.max_ms} ms</td></tr>`).join('');
+    $('#metrics-note').textContent = metrics.note;
+  }
+  // events
+  $('#events').innerHTML = '<tr><th>Event</th><th>Type</th><th>Aggregate</th><th>Status</th><th class="num">Attempts</th><th>Created</th><th>Processed</th><th>Last error</th><th></th></tr>' +
+    events.map(e => `<tr><td class="mono small">${esc(e.event_id)}</td><td class="small">${esc(e.type)}</td><td class="mono small">${esc(e.aggregate_id)}</td>
+      <td>${statusBadge(e.status)}</td><td class="num">${e.attempts}</td><td class="small">${fmtTime(e.created_at)}</td><td class="small">${fmtTime(e.processed_at)}</td>
+      <td class="small" style="max-width:260px">${esc((e.last_error || '').slice(0, 120))}</td>
+      <td>${e.status === 'DEAD' || e.status === 'PENDING' ? `<button class="sm secondary" data-retry="${esc(e.event_id)}">Retry</button>` : ''}</td></tr>`).join('');
+  // requests
+  $('#requests').innerHTML = '<tr><th>Time</th><th>Correlation</th><th>Request</th><th>Status</th><th class="num">Total</th><th>Database operations</th></tr>' +
+    reqs.map(r => `<tr><td class="small">${fmtTime(r.at)}</td><td class="mono small">${esc(r.correlation_id)}</td>
+      <td><span class="method">${esc(r.method)}</span> <span class="mono small">${esc(r.path)}</span></td>
+      <td class="${r.status < 400 ? 'status-ok' : 'status-bad'}">${r.status}</td><td class="num">${r.ms} ms</td>
+      <td>${r.ops.map(o => `${storeBadge(o.store)} <span class="small mono">${esc(o.op)}</span> <span class="muted small">${o.ms}ms</span>`).join('<br>')}</td></tr>`).join('') ||
+    '<tr><td colspan="6" class="muted">No storefront traffic yet — use the Shop page.</td></tr>';
+}
+
+document.addEventListener('click', async e => {
+  const d = e.target.closest('button')?.dataset || {};
+  if (d.retry) { try { await api(`/api/admin/outbox/${d.retry}/retry`, { method: 'POST' }); toast('Event re-queued'); refresh(); } catch (err) { toast(err.message, 'error'); } }
+});
+$('#project').onclick = async () => { try { const r = await api('/api/admin/project', { method: 'POST' }); toast(`Projector: claimed ${r.claimed}, processed ${r.processed}, failed ${r.failed}${r.error ? ' · ' + r.error : ''}`, r.failed ? 'error' : 'ok'); refresh(); } catch (err) { toast(err.message, 'error'); } };
+$('#retry-dead').onclick = async () => { const r = await api('/api/admin/outbox/retry-dead', { method: 'POST' }); toast(`${r.requeued} dead event(s) re-queued`); refresh(); };
+$('#reset').onclick = async () => { await api('/api/admin/metrics/reset', { method: 'POST' }); refresh(); };
+$('#refresh').onclick = refresh;
+$('#status').onchange = refresh;
+setInterval(() => { if ($('#auto').checked) refresh(); }, 3000);
+refresh();
+</script>
+</body>
+</html>

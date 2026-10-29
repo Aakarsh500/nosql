@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Polyglot Commerce · Shop</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<main class="page">
+  <div class="grid-shop">
+    <!-- filters: every control maps to a MongoDB query on the products collection -->
+    <aside>
+      <section class="panel">
+        <div class="panel-head"><h2>Filters</h2><span class="badge mongo">MongoDB</span></div>
+        <div class="field"><label for="q">Search (text index)</label><input id="q" placeholder="e.g. waterproof, laptop"></div>
+        <div class="field"><label for="category">Category</label><select id="category"><option value="">All categories</option></select></div>
+        <div class="field row"><div><label for="min">Min ₹</label><input id="min" type="number" min="0"></div>
+          <div><label for="max">Max ₹</label><input id="max" type="number" min="0"></div></div>
+        <div class="field"><label for="sort">Sort</label>
+          <select id="sort"><option value="name">Name</option><option value="price_asc">Price: low to high</option>
+            <option value="price_desc">Price: high to low</option><option value="newest">Newest</option><option value="relevance">Relevance (search)</option></select></div>
+        <div class="field"><label for="attr">Attribute filter (key:value)</label>
+          <div class="row"><input id="attr" placeholder="waterproof:true"><button class="sm" id="add-attr">Add</button></div>
+          <div id="attr-keys" class="row wrap small" style="margin-top:6px"></div>
+          <div id="attr-chips" class="row wrap" style="margin-top:6px"></div></div>
+        <p class="muted small" id="query-desc" style="margin-top:10px"></p>
+      </section>
+    </aside>
+
+    <!-- catalog -->
+    <section>
+      <div class="panel">
+        <div class="panel-head"><h2 id="result-title">Catalog</h2>
+          <div class="row"><button class="secondary sm" id="prev">‹ Prev</button><span class="muted small" id="page-info"></span><button class="secondary sm" id="next">Next ›</button></div></div>
+        <div id="products" class="products"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Database trace</h2><button class="ghost sm" id="clear-trace">Clear</button></div>
+        <p class="muted small" style="margin:-6px 0 10px">Each request made by this page, its correlation ID, and the exact Redis / MongoDB / Neo4j operations the API ran for it.</p>
+        <div id="trace" class="trace"></div>
+      </div>
+    </section>
+
+    <aside class="right">
+      <!-- session: Redis sess:{id} -->
+      <section class="panel">
+        <div class="panel-head"><h2>Session</h2><span class="badge redis">Redis</span></div>
+        <div id="session-out">
+          <div class="field"><label for="login-id">Customer ID</label><input id="login-id" value="c_0001"></div>
+          <div class="field"><label for="login-name">Display name</label><input id="login-name" value="Demo Customer"></div>
+          <button id="login" style="margin-top:10px">Log in (merge guest cart)</button>
+          <p class="muted small">Guest mode. Logging in creates <code>sess:{id}</code> (30 min sliding TTL) and merges this guest cart into the customer's cart.</p>
+        </div>
+        <div id="session-in" class="hidden">
+          <dl class="kv" id="session-kv"></dl>
+          <div class="row" style="margin-top:10px"><button class="secondary sm" id="refresh-session">Refresh TTL</button><button class="danger sm" id="logout">Log out</button></div>
+        </div>
+      </section>
+
+      <!-- cart: Redis cart:{id} + cartmeta:{id} -->
+      <section class="panel">
+        <div class="panel-head"><h2>Cart</h2><span class="badge redis">Redis</span></div>
+        <div id="cart-lines"></div>
+        <div class="row between" style="margin-top:10px"><strong>Subtotal</strong><strong id="subtotal">₹0</strong></div>
+        <dl class="kv small" id="cart-meta" style="margin-top:10px"></dl>
+        <div class="row" style="margin-top:8px"><button class="ghost sm" id="clear-cart">Empty cart</button></div>
+      </section>
+
+      <!-- checkout: MongoDB order + outbox in one transaction -->
+      <section class="panel">
+        <div class="panel-head"><h2>Checkout</h2><span class="badge mongo">MongoDB</span></div>
+        <div class="field" id="guest-customer"><label for="checkout-customer">Customer ID (guest checkout)</label><input id="checkout-customer" value="c_guest"></div>
+        <div class="field"><label>Idempotency-Key</label><div class="row"><input id="idem" class="mono" readonly><button class="secondary sm" id="new-key" title="Generate a new key">New</button></div></div>
+        <div class="row" style="margin-top:10px"><button id="checkout">Place order</button><button class="secondary" id="replay" disabled title="Send the same request again with the same key">Retry same key</button></div>
+        <div id="checkout-result" style="margin-top:10px"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>My orders</h2><span><span class="badge mongo">MongoDB</span> <span class="badge neo4j">Neo4j sync</span></span></div>
+        <div id="orders"><p class="muted small">Log in to see order history.</p></div>
+      </section>
+    </aside>
+  </div>
+</main>
+
+<div class="modal-bg hidden" id="modal"><div class="modal" id="modal-body"></div></div>
+
+<script src="/static/common.js"></script>
+<script>
+renderNav('shop');
+const tracePanel = mountTracePanel($('#trace'));
+$('#clear-trace').onclick = () => tracePanel.clear();
+
+const state = { cartId: localStorage.getItem('pp-cart'), session: null, offset: 0, limit: 12, total: 0,
+  attrs: [], categories: [], products: {}, lastCheckout: null, idem: newIdempotencyKey() };
+$('#idem').value = state.idem;
+
+// ---------------------------------------------------------------- catalog
+async function loadCategories() {
+  state.categories = await api('/api/categories');
+  $('#category').innerHTML = '<option value="">All categories</option>' +
+    state.categories.map(c => `<option value="${esc(c.id)}">${esc(c.name)} (${c.count})</option>`).join('');
+  showAttributeKeys();
+}
+function showAttributeKeys() {
+  const cat = state.categories.find(c => c.id === $('#category').value);
+  $('#attr-keys').innerHTML = cat ? '<span class="muted">Keys used in this category:</span>' +
+    cat.attribute_keys.map(k => `<button class="chip off" data-key="${esc(k)}">${esc(k)}</button>`).join('') : '';
+}
+async function loadProducts() {
+  const p = new URLSearchParams({ limit: state.limit, offset: state.offset, sort: $('#sort').value });
+  if ($('#q').value.trim()) p.set('q', $('#q').value.trim());
+  if ($('#category').value) p.set('category', $('#category').value);
+  if ($('#min').value) p.set('min_price', $('#min').value);
+  if ($('#max').value) p.set('max_price', $('#max').value);
+  state.attrs.forEach(a => p.append('attr', a));
+  try {
+    const res = await api('/api/products?' + p);
+    state.total = res.total;
+    res.items.forEach(x => state.products[x.id] = x);
+    $('#result-title').textContent = `Catalog · ${res.total} product${res.total === 1 ? '' : 's'}`;
+    $('#query-desc').innerHTML = `MongoDB filter: <code>${esc(res.query)}</code>`;
+    $('#page-info').textContent = res.total ? `${state.offset + 1}–${Math.min(state.offset + state.limit, res.total)}` : '0';
+    $('#prev').disabled = state.offset === 0;
+    $('#next').disabled = state.offset + state.limit >= res.total;
+    $('#products').innerHTML = res.items.map(x => `
+      <div class="card">
+        <div class="thumb">${CATEGORY_ICON[x.category.id] || '📦'}</div>
+        <span class="cat">${esc(x.category.name)}</span>
+        <h3>${esc(x.name)}</h3>
+        <div class="attrs">${esc(attrSummary(x.attributes))}</div>
+        <div class="price">${money(x.price.amount)}</div>
+        <div class="actions"><button class="sm" data-add="${esc(x.id)}">Add to cart</button>
+          <button class="secondary sm" data-open="${esc(x.id)}">Details & recs</button></div>
+      </div>`).join('') || '<p class="muted">No products match these filters.</p>';
+  } catch (e) { toast(e.message, 'error'); }
+}
+const reload = () => { state.offset = 0; loadProducts(); };
+$('#q').oninput = debounce(reload, 350);
+['#category', '#sort'].forEach(s => $(s).onchange = () => { showAttributeKeys(); reload(); });
+['#min', '#max'].forEach(s => $(s).oninput = debounce(reload, 400));
+$('#prev').onclick = () => { state.offset = Math.max(0, state.offset - state.limit); loadProducts(); };
+$('#next').onclick = () => { state.offset += state.limit; loadProducts(); };
+function drawAttrChips() {
+  $('#attr-chips').innerHTML = state.attrs.map((a, i) => `<button class="chip" data-rm-attr="${i}">${esc(a)} ✕</button>`).join('');
+}
+$('#add-attr').onclick = () => {
+  const v = $('#attr').value.trim();
+  if (!/^[A-Za-z][A-Za-z0-9_]*:.+$/.test(v)) return toast('Use the form key:value, e.g. waterproof:true', 'error');
+  state.attrs.push(v); $('#attr').value = ''; drawAttrChips(); reload();
+};
+
+// ---------------------------------------------------------------- session
+async function loadSession() {
+  try { state.session = await api('/api/sessions/current'); } catch { state.session = null; }
+  drawSession();
+}
+function drawSession() {
+  const s = state.session;
+  $('#session-out').classList.toggle('hidden', !!s);
+  $('#session-in').classList.toggle('hidden', !s);
+  $('#guest-customer').classList.toggle('hidden', !!s);
+  if (s) {
+    $('#session-kv').innerHTML = `<dt>Customer</dt><dd>${esc(s.customerId)} (${esc(s.displayName)})</dd>
+      <dt>Redis key</dt><dd class="mono">sess:${esc(s.id.slice(0, 14))}…</dd>
+      <dt>TTL</dt><dd><span id="sess-ttl" data-ttl="${s.ttl_seconds}" data-at="${Date.now()}">${s.ttl_seconds}</span> s (sliding)</dd>
+      <dt>Last seen</dt><dd>${fmtTime(s.lastSeenAt)}</dd>`;
+  }
+  loadOrders();
+}
+$('#login').onclick = async () => {
+  try {
+    const r = await api('/api/sessions', { method: 'POST', body: { customer_id: $('#login-id').value.trim(), display_name: $('#login-name').value.trim(), cart_id: state.cartId } });
+    state.session = r.session; setCart(r.cart_id);
+    toast(r.merged_lines ? `Logged in · merged ${r.merged_lines} guest cart line(s) into your cart` : 'Logged in · cart attached to customer', 'ok');
+    drawSession(); renderCart();
+  } catch (e) { toast(e.message, 'error'); }
+};
+$('#logout').onclick = async () => {
+  await api('/api/sessions/current', { method: 'DELETE' }).catch(() => {});
+  state.session = null; setCart(null); await ensureCart(); drawSession(); renderCart();
+  toast('Logged out · your cart stays saved in Redis for your next login');
+};
+$('#refresh-session').onclick = loadSession;
+setInterval(() => {
+  const el = $('#sess-ttl');
+  if (el) el.textContent = Math.max(0, Number(el.dataset.ttl) - Math.round((Date.now() - Number(el.dataset.at)) / 1000));
+}, 1000);
+
+// ---------------------------------------------------------------- cart
+function setCart(id) { state.cartId = id; id ? localStorage.setItem('pp-cart', id) : localStorage.removeItem('pp-cart'); }
+async function ensureCart() {
+  if (state.cartId) { try { await api('/api/carts/' + state.cartId); return; } catch (e) { if (e.status !== 404) throw e; } }
+  const c = await api('/api/carts', { method: 'POST' });
+  setCart(c.id);
+}
+async function renderCart(cart) {
+  try { cart = cart || await api('/api/carts/' + state.cartId); }
+  catch (e) {
+    if (e.status === 404) { setCart(null); await ensureCart(); return renderCart(); }
+    $('#cart-lines').innerHTML = `<div class="note bad">${esc(e.message)}</div>`; return;
+  }
+  $('#cart-lines').innerHTML = cart.lines.map(l => `
+    <div class="cart-line"><div class="name"><b>${esc(l.name)}</b>${l.available ? '' : ' <span class="badge bad">unavailable</span>'}<br>
+      <span class="muted small">${money(l.unit_price)} each · ${esc(l.product_id)}</span></div>
+      <span class="qty"><button data-dec="${esc(l.product_id)}">−</button><span>${l.quantity}</span><button data-inc="${esc(l.product_id)}">+</button></span>
+      <button class="ghost sm" data-remove="${esc(l.product_id)}" title="Remove">✕</button></div>`).join('') || '<p class="muted">Your cart is empty.</p>';
+  $('#subtotal').textContent = money(cart.subtotal);
+  $('#cart-meta').innerHTML = `<dt>Cart ID</dt><dd class="mono">${esc(cart.id)}</dd>
+    <dt>Keys</dt><dd class="mono">cart:${esc(cart.id)} · cartmeta:${esc(cart.id)}</dd>
+    <dt>TTL</dt><dd>${cart.ttl_seconds.toLocaleString()} s (${(cart.ttl_seconds / 86400).toFixed(2)} days, sliding)</dd>
+    <dt>Version</dt><dd>${esc(cart.meta.version)}${cart.meta.userId ? ` · owner ${esc(cart.meta.userId)}` : ' · guest'}</dd>`;
+}
+async function cartCall(path, method, body) {
+  try { renderCart(await api(path, { method, body })); return true; } catch (e) { toast(e.message, 'error'); return false; }
+}
+$('#clear-cart').onclick = () => cartCall(`/api/carts/${state.cartId}/items`, 'DELETE');
+
+// ---------------------------------------------------------------- checkout
+function drawCheckout(res, replay) {
+  const o = res.order;
+  $('#checkout-result').innerHTML = `
+    <div class="note ${res.created ? 'ok' : 'warn'}">${res.created
+      ? `<b>201 Created</b> · new order <code>${esc(o.id)}</code>`
+      : `<b>200 OK (replay)</b> · same order <code>${esc(o.id)}</code> returned, nothing duplicated`}
+      <br>Total ${money(o.total_amount)} · ${o.line_items.length} line(s) · key <code>${esc(o.idempotency_key)}</code>
+      <br>Graph projection: ${statusBadge(o.graph_projection?.status || 'PENDING')}</div>`;
+}
+async function placeOrder(key) {
+  const body = { cart_id: state.cartId };
+  if (!state.session) body.customer_id = $('#checkout-customer').value.trim();
+  try {
+    const res = await api('/api/orders', { method: 'POST', body, headers: { 'Idempotency-Key': key } });
+    state.lastCheckout = { key, body };
+    drawCheckout(res);
+    $('#replay').disabled = false;
+    if (res.created) toast(`Order ${res.order.id} stored in MongoDB · outbox event queued for Neo4j`, 'ok');
+    renderCart(); loadOrders();
+  } catch (e) { toast(e.message, 'error'); }
+}
+$('#checkout').onclick = async () => { await placeOrder(state.idem); state.idem = newIdempotencyKey(); $('#idem').value = state.idem; };
+$('#replay').onclick = () => state.lastCheckout && placeOrder(state.lastCheckout.key);
+$('#new-key').onclick = () => { state.idem = newIdempotencyKey(); $('#idem').value = state.idem; };
+
+let orderTimer = null;
+async function loadOrders() {
+  clearTimeout(orderTimer);
+  const customer = state.session?.customerId || (state.lastCheckout && $('#checkout-customer').value.trim());
+  if (!customer) { $('#orders').innerHTML = '<p class="muted small">Log in or check out to see order history.</p>'; return; }
+  try {
+    const orders = await api('/api/orders?customer_id=' + encodeURIComponent(customer) + '&limit=8', { quiet: true });
+    $('#orders').innerHTML = orders.length ? `<table><tr><th>Order</th><th class="num">Total</th><th>Graph</th></tr>${orders.map(o => `
+      <tr><td><span class="mono small">${esc(o.id)}</span><br><span class="muted small">${fmtDateTime(o.created_at)}</span></td>
+      <td class="num">${money(o.total_amount)}</td><td>${statusBadge(o.graph_projection?.status || '—')}</td></tr>`).join('')}</table>`
+      : '<p class="muted small">No orders yet.</p>';
+    if (orders.some(o => o.graph_projection && o.graph_projection.status !== 'PROCESSED')) orderTimer = setTimeout(loadOrders, 2000);
+  } catch (e) { $('#orders').innerHTML = `<div class="note bad">${esc(e.message)}</div>`; }
+}
+
+// ---------------------------------------------------------------- product modal + recommendations
+async function openProduct(id) {
+  const p = await api('/api/products/' + id);
+  $('#modal').classList.remove('hidden');
+  $('#modal-body').innerHTML = `
+    <div class="panel-head"><div><span class="badge mongo">MongoDB document</span> <span class="cat muted small">${esc(p.category.name)}</span>
+      <h2 style="font-size:22px;margin-top:6px">${esc(p.name)}</h2><span class="muted">${esc(p.description || '')}</span></div>
+      <button class="secondary" id="close-modal">Close</button></div>
+    <div class="cols-2">
+      <div>
+        <div class="row between"><span class="price" style="font-size:22px;font-weight:750">${money(p.price.amount)}</span>
+          <button data-add="${esc(p.id)}">Add to cart</button></div>
+        <div class="section-title">Category-specific attributes (embedded)</div>
+        <table>${Object.entries(p.attributes).map(([k, v]) => `<tr><td class="mono">${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}</table>
+        ${p.variants.length ? `<div class="section-title">Variants (embedded array)</div><div class="table-wrap"><table>
+          <tr>${Object.keys(p.variants[0]).map(k => `<th>${esc(k)}</th>`).join('')}</tr>
+          ${p.variants.map(v => `<tr>${Object.values(v).map(x => `<td>${esc(x)}</td>`).join('')}</tr>`).join('')}</table></div>` : ''}
+        <details style="margin-top:12px"><summary class="small"><b>Raw MongoDB document</b></summary>${jsonBlock(p)}</details>
+      </div>
+      <div>
+        <div class="row between"><h3>Customers who bought this also bought</h3><span class="badge neo4j">Neo4j</span></div>
+        <div class="row wrap" style="margin:10px 0">
+          <select id="rec-strategy" style="width:auto"><option value="support">Score: shared buyers</option><option value="jaccard">Score: Jaccard</option></select>
+          <label class="row" style="margin:0;gap:4px">min support <input id="rec-min" type="number" min="1" value="1" style="width:64px"></label>
+          <label class="row" style="margin:0;gap:4px"><input id="rec-same" type="checkbox" style="width:auto"> same category</label>
+        </div>
+        <div id="recs"><p class="muted">Loading…</p></div>
+      </div>
+    </div>`;
+  $('#close-modal').onclick = closeModal;
+  ['#rec-strategy', '#rec-min', '#rec-same'].forEach(s => $(s).onchange = () => loadRecs(id));
+  loadRecs(id);
+}
+async function loadRecs(id) {
+  const p = new URLSearchParams({ strategy: $('#rec-strategy').value, min_support: $('#rec-min').value || 1, same_category: $('#rec-same').checked, limit: 5 });
+  try {
+    const r = await api(`/api/products/${id}/recommendations?${p}`);
+    const lag = r.projection;
+    $('#recs').innerHTML = `
+      ${r.degraded ? `<div class="note bad">${esc(r.degraded)}</div>` : ''}
+      ${lag?.updating ? `<div class="note warn">Recommendations updating: ${lag.backlog} order event(s) not yet projected (oldest ${lag.oldest_pending_age_s}s, target ${lag.lag_target_s}s).</div>` : ''}
+      ${r.items.map(i => `<div class="cart-line"><div class="name"><b>${esc(i.product.name)}</b> <span class="badge ${i.source === 'graph' ? 'neo4j' : 'warn'}">${esc(i.source)}</span><br>
+        <span class="small">${esc(i.reason)}</span>
+        ${i.sample_buyers ? `<br><span class="muted small">shared buyers e.g. ${i.sample_buyers.map(esc).join(', ')}</span>` : ''}</div>
+        ${i.shared_buyers != null ? `<div class="num"><b style="font-size:18px">${i.shared_buyers}</b><br><span class="muted small">J ${i.jaccard}</span></div>` : ''}
+        <button class="secondary sm" data-open="${esc(i.product.id)}">Open</button></div>`).join('') || '<p class="muted">No recommendation yet.</p>'}
+      <details style="margin-top:12px" open><summary class="small"><b>Cypher executed on Neo4j</b></summary>
+        <pre class="code">${esc(r.cypher)}</pre><div class="small muted" style="margin-top:4px">params: <code>${esc(JSON.stringify(r.params))}</code></div></details>`;
+  } catch (e) { $('#recs').innerHTML = `<div class="note bad">${esc(e.message)}</div>`; }
+}
+function closeModal() { $('#modal').classList.add('hidden'); }
+$('#modal').onclick = e => { if (e.target.id === 'modal') closeModal(); };
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+// ---------------------------------------------------------------- delegated clicks
+document.addEventListener('click', e => {
+  const d = e.target.closest('button')?.dataset || {};
+  if (d.add) cartCall(`/api/carts/${state.cartId}/items/${d.add}/increment`, 'POST', { delta: 1 }).then(ok => ok && toast('Added · atomic HINCRBY (Lua) in Redis'));
+  if (d.inc) cartCall(`/api/carts/${state.cartId}/items/${d.inc}/increment`, 'POST', { delta: 1 });
+  if (d.dec) cartCall(`/api/carts/${state.cartId}/items/${d.dec}/increment`, 'POST', { delta: -1 });
+  if (d.remove) cartCall(`/api/carts/${state.cartId}/items/${d.remove}`, 'DELETE');
+  if (d.open) openProduct(d.open).catch(err => toast(err.message, 'error'));
+  if (d.key) { $('#attr').value = d.key + ':'; $('#attr').focus(); }
+  if (d.rmAttr !== undefined) { state.attrs.splice(Number(d.rmAttr), 1); drawAttrChips(); reload(); }
+});
+
+(async () => {
+  try { await loadSession(); await ensureCart(); await Promise.all([loadCategories(), loadProducts(), renderCart()]); }
+  catch (e) { toast('Startup error: ' + e.message, 'error', 8000); }
+})();
+</script>
+</body>
+</html>

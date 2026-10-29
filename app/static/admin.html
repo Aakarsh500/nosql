@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Polyglot Commerce · Admin</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<main class="page">
+  <div class="cols-2" style="grid-template-columns: minmax(0,1.25fr) minmax(0,1fr)">
+    <section class="panel">
+      <div class="panel-head"><h2>Products <span class="badge mongo">MongoDB · products</span></h2>
+        <div class="row"><input id="search" placeholder="Search" style="width:180px">
+          <label class="row" style="margin:0;gap:4px;white-space:nowrap"><input type="checkbox" id="inactive" style="width:auto" checked> include inactive</label></div></div>
+      <div class="table-wrap"><table id="table"></table></div>
+      <div class="row" style="margin-top:10px"><button class="secondary sm" id="prev">‹ Prev</button><span class="muted small" id="page"></span><button class="secondary sm" id="next">Next ›</button></div>
+    </section>
+
+    <section>
+      <div class="panel">
+        <div class="panel-head"><h2 id="form-title">Create product</h2><button class="secondary sm" id="new">New product</button></div>
+        <form id="form" class="stack" autocomplete="off">
+          <div class="cols-2"><div><label for="f-id">Product ID</label><input id="f-id" placeholder="p_200" required></div>
+            <div><label for="f-sku">SKU (unique index)</label><input id="f-sku" required></div></div>
+          <div class="cols-2"><div><label for="f-name">Name</label><input id="f-name" required></div>
+            <div><label for="f-slug">Slug (unique index)</label><input id="f-slug" required></div></div>
+          <div><label for="f-desc">Description</label><input id="f-desc"></div>
+          <div class="cols-3"><div><label for="f-cat">Category ID</label><input id="f-cat" list="cats" required></div>
+            <div><label for="f-catname">Category name</label><input id="f-catname" required></div>
+            <div><label for="f-price">Price (₹)</label><input id="f-price" type="number" min="0" required></div></div>
+          <datalist id="cats"></datalist>
+          <div class="cols-2"><div><label for="f-status">Status</label><select id="f-status"><option>ACTIVE</option><option>INACTIVE</option></select></div>
+            <div><label for="f-tags">Tags (comma separated)</label><input id="f-tags"></div></div>
+          <div><label for="f-attrs">Attributes (JSON object, category-specific: any keys)</label><textarea id="f-attrs">{}</textarea></div>
+          <div><label for="f-variants">Variants (JSON array; each needs variantId)</label><textarea id="f-variants">[]</textarea></div>
+          <div class="row"><button type="submit" id="save">Save to MongoDB</button><span class="muted small" id="form-note"></span></div>
+        </form>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>Last write</h3></div>
+        <div id="result"><p class="muted small">Every create/update writes the product <b>and</b> a <code>PRODUCT_UPSERTED</code> outbox event in one MongoDB transaction. The projector then updates the product's category/active flag in Neo4j — the API never writes to Neo4j directly.</p></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>Database trace</h3></div>
+        <div id="trace" class="trace"></div>
+      </div>
+    </section>
+  </div>
+</main>
+<script src="/static/common.js"></script>
+<script>
+renderNav('admin');
+mountTracePanel($('#trace'), 15);
+const st = { offset: 0, limit: 15, editing: null, original: null };
+
+async function load() {
+  const p = new URLSearchParams({ limit: st.limit, offset: st.offset, include_inactive: $('#inactive').checked, sort: 'newest' });
+  if ($('#search').value.trim()) p.set('q', $('#search').value.trim());
+  const res = await api('/api/products?' + p);
+  $('#table').innerHTML = `<tr><th>ID</th><th>Name</th><th>Category</th><th class="num">Price</th><th>Status</th><th></th></tr>` +
+    res.items.map(x => `<tr><td class="mono small">${esc(x.id)}</td><td>${esc(x.name)}<br><span class="muted small">${esc(attrSummary(x.attributes, 2))}</span></td>
+      <td>${esc(x.category.name)}</td><td class="num">${money(x.price.amount)}</td><td>${statusBadge(x.status)}</td>
+      <td class="row"><button class="secondary sm" data-edit="${esc(x.id)}">Edit</button>
+      ${x.status === 'ACTIVE' ? `<button class="danger sm" data-del="${esc(x.id)}">Soft delete</button>` : `<button class="sm" data-restore="${esc(x.id)}">Restore</button>`}</td></tr>`).join('');
+  $('#page').textContent = `${res.total ? st.offset + 1 : 0}–${Math.min(st.offset + st.limit, res.total)} of ${res.total}`;
+  $('#prev').disabled = st.offset === 0; $('#next').disabled = st.offset + st.limit >= res.total;
+}
+async function loadCats() {
+  const cats = await api('/api/categories', { quiet: true });
+  $('#cats').innerHTML = cats.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
+  window._cats = cats;
+}
+$('#f-cat').oninput = () => { const c = (window._cats || []).find(c => c.id === $('#f-cat').value); if (c) $('#f-catname').value = c.name; };
+$('#f-name').oninput = () => { if (!st.editing) $('#f-slug').value = $('#f-name').value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''); };
+
+function fill(p) {
+  st.editing = p ? p.id : null; st.original = p;
+  $('#form-title').textContent = p ? `Edit ${p.id}` : 'Create product';
+  $('#f-id').value = p?.id || ''; $('#f-id').disabled = !!p;
+  $('#f-sku').value = p?.sku || ''; $('#f-name').value = p?.name || ''; $('#f-slug').value = p?.slug || '';
+  $('#f-desc').value = p?.description || ''; $('#f-cat').value = p?.category.id || ''; $('#f-catname').value = p?.category.name || '';
+  $('#f-price').value = p?.price.amount ?? ''; $('#f-status').value = p?.status || 'ACTIVE'; $('#f-tags').value = (p?.tags || []).join(', ');
+  $('#f-attrs').value = JSON.stringify(p?.attributes || {}, null, 2); $('#f-variants').value = JSON.stringify(p?.variants || [], null, 2);
+  $('#form-note').textContent = p ? 'Attributes are merged key by key; removed keys are $unset.' : '';
+}
+$('#new').onclick = () => fill(null);
+
+$('#form').onsubmit = async e => {
+  e.preventDefault();
+  let attributes, variants;
+  try { attributes = JSON.parse($('#f-attrs').value || '{}'); variants = JSON.parse($('#f-variants').value || '[]'); }
+  catch (err) { return toast('Attributes/variants must be valid JSON: ' + err.message, 'error'); }
+  const body = { sku: $('#f-sku').value.trim(), name: $('#f-name').value.trim(), slug: $('#f-slug').value.trim(),
+    description: $('#f-desc').value.trim(), category: { id: $('#f-cat').value.trim(), name: $('#f-catname').value.trim() },
+    price: { amount: Number($('#f-price').value), currency: 'INR' }, status: $('#f-status').value,
+    tags: $('#f-tags').value.split(',').map(t => t.trim()).filter(Boolean), variants, attributes };
+  try {
+    let saved;
+    if (st.editing) {
+      const removed = Object.keys(st.original.attributes || {}).filter(k => !(k in attributes));
+      removed.forEach(k => body.attributes[k] = null);
+      saved = await api('/api/products/' + st.editing, { method: 'PATCH', body });
+    } else {
+      saved = await api('/api/products', { method: 'POST', body: { id: $('#f-id').value.trim(), ...body } });
+    }
+    $('#result').innerHTML = `<div class="note ok">Saved <code>${esc(saved.id)}</code> · outbox event PRODUCT_UPSERTED queued</div>${jsonBlock(saved)}`;
+    toast('Saved to MongoDB', 'ok'); fill(saved); load(); loadCats();
+  } catch (err) { $('#result').innerHTML = `<div class="note bad"><b>${err.status}</b> ${esc(err.message)}</div>`; toast(err.message, 'error'); }
+};
+
+document.addEventListener('click', async e => {
+  const d = e.target.closest('button')?.dataset || {};
+  try {
+    if (d.edit) fill(await api('/api/products/' + d.edit));
+    if (d.del) { const r = await api('/api/products/' + d.del, { method: 'DELETE' }); toast(`${r.id} is now INACTIVE (soft delete keeps order history valid)`); load(); }
+    if (d.restore) { await api('/api/products/' + d.restore, { method: 'PATCH', body: { status: 'ACTIVE' } }); toast('Restored'); load(); }
+  } catch (err) { toast(err.message, 'error'); }
+});
+$('#search').oninput = debounce(() => { st.offset = 0; load(); });
+$('#inactive').onchange = () => { st.offset = 0; load(); };
+$('#prev').onclick = () => { st.offset = Math.max(0, st.offset - st.limit); load(); };
+$('#next').onclick = () => { st.offset += st.limit; load(); };
+fill(null); load().catch(e => toast(e.message, 'error')); loadCats();
+</script>
+</body>
+</html>

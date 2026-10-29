@@ -1,0 +1,122 @@
+name: polyglot-commerce
+
+# One command starts everything:  docker compose up --build -d
+# Shop / API ............ http://localhost:8001        (API docs: /docs)
+# Neo4j Browser ......... http://localhost:7474        (neo4j / review2password)
+# Mongo Express ......... http://localhost:8081        (admin / admin123)
+# Redis Commander ....... http://localhost:8082
+
+x-db-env: &db_env
+  REDIS_URL: redis://redis:6379/0
+  MONGO_URI: mongodb://mongo:27017/?replicaSet=rs0&directConnection=true
+  MONGO_DB: polyglot_commerce
+  NEO4J_URI: bolt://neo4j:7687
+  NEO4J_USER: neo4j
+  NEO4J_PASSWORD: review2password
+
+services:
+  # ---------------------------------------------------------------- databases
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: ["redis_data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 12
+
+  mongo:
+    image: mongo:8.0
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports: ["127.0.0.1:27017:27017"]
+    volumes: ["mongo_data:/data/db"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      retries: 20
+
+  # single-node replica set: required for the order + outbox transaction
+  mongo-init:
+    image: mongo:8.0
+    depends_on:
+      mongo: {condition: service_healthy}
+    volumes: ["./scripts/init-mongo.js:/scripts/init-mongo.js:ro"]
+    command: ["mongosh", "--quiet", "mongodb://mongo:27017/admin?directConnection=true", "/scripts/init-mongo.js"]
+    restart: "no"
+
+  neo4j:
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: neo4j/review2password
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 768m
+      NEO4J_server_memory_pagecache_size: 256m
+    ports: ["127.0.0.1:7474:7474", "127.0.0.1:7687:7687"]
+    volumes: ["neo4j_data:/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p review2password 'RETURN 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 40
+      start_period: 15s
+
+  # ---------------------------------------------------------------- application
+  seed:
+    build: .
+    command: ["python", "-m", "app.seed"]
+    environment: *db_env
+    depends_on:
+      redis: {condition: service_healthy}
+      mongo-init: {condition: service_completed_successfully}
+      neo4j: {condition: service_healthy}
+    restart: "no"
+
+  app:
+    build: .
+    ports: ["127.0.0.1:8001:8000"]
+    environment: *db_env
+    volumes: ["./artifacts:/app/artifacts"]
+    depends_on:
+      seed: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
+      interval: 10s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    environment: *db_env
+    depends_on:
+      seed: {condition: service_completed_successfully}
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- database UIs for the review
+  mongo-express:
+    image: mongo-express:1.0.2
+    ports: ["127.0.0.1:8081:8081"]
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://mongo:27017/?replicaSet=rs0&directConnection=true
+      ME_CONFIG_BASICAUTH: "true"
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: admin123
+    depends_on:
+      mongo-init: {condition: service_completed_successfully}
+    restart: unless-stopped
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    ports: ["127.0.0.1:8082:8081"]
+    environment:
+      REDIS_HOSTS: polyglot:redis:6379:0
+      FOLDING_CHAR: "~"   # our keys never contain "~", so keys are listed flat (no folders) and are directly clickable
+    depends_on:
+      redis: {condition: service_healthy}
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  mongo_data:
+  neo4j_data:

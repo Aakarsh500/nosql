@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Polyglot Commerce · DB Explorer</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<main class="page">
+  <div class="panel-head"><div><h2 style="font-size:20px">Database explorer</h2>
+    <span class="muted">Live, read-only view of what is actually stored in each database, how it is indexed, and how queries run.</span></div></div>
+  <div class="tabs">
+    <button class="tab active" data-tab="redis">Redis · key-value</button>
+    <button class="tab" data-tab="mongo">MongoDB · documents</button>
+    <button class="tab" data-tab="neo4j">Neo4j · graph</button>
+  </div>
+
+  <!-- ================================================================ REDIS -->
+  <section id="tab-redis">
+    <div class="cols-4" id="redis-kpis" style="margin-bottom:16px"></div>
+    <div class="cols-2" style="grid-template-columns:minmax(0,1.1fr) minmax(0,1fr)">
+      <div class="panel">
+        <div class="panel-head"><h2>Keys <span class="badge redis">SCAN</span></h2>
+          <div class="row"><input id="r-pattern" value="*" class="mono" style="width:160px"><button id="r-scan">Scan</button></div></div>
+        <div class="row wrap" style="margin-bottom:10px">
+          <button class="chip" data-pattern="sess:*">sess:*</button><button class="chip" data-pattern="cart:*">cart:*</button>
+          <button class="chip" data-pattern="cartmeta:*">cartmeta:*</button><button class="chip" data-pattern="usercart:*">usercart:*</button>
+          <button class="chip" data-pattern="checkout:idem:*">checkout:idem:*</button><button class="chip off" data-pattern="*">all</button></div>
+        <div class="table-wrap" style="max-height:520px;overflow:auto"><table id="r-keys"></table></div>
+        <p class="muted small">TTL counts down live. <b>-1</b> = no expiry. The app itself never uses SCAN/KEYS; it always knows the key. SCAN is used only here, for diagnostics.</p>
+      </div>
+      <div>
+        <div class="panel"><div class="panel-head"><h2>Value</h2><span id="r-key-name" class="mono small muted"></span></div><div id="r-value"><p class="muted">Click a key to inspect it.</p></div></div>
+        <div class="panel">
+          <div class="panel-head"><h2>redis-cli (read-only)</h2></div>
+          <div class="row"><input id="r-cmd" class="mono" placeholder="HGETALL cart:cart_…" value="INFO keyspace"><button id="r-run">Run</button></div>
+          <div class="row wrap small" style="margin-top:6px"><span class="muted">Allowed: GET HGET HGETALL HKEYS HLEN TTL PTTL TYPE EXISTS SCAN DBSIZE INFO STRLEN MEMORY USAGE OBJECT ENCODING</span></div>
+          <div id="r-cmd-out" style="margin-top:10px"></div>
+        </div>
+        <div class="panel"><h3>Key-space design</h3>
+          <table class="small" style="margin-top:8px"><tr><th>Key</th><th>Type</th><th>TTL</th><th>Purpose</th></tr>
+            <tr><td class="mono">sess:{sessionId}</td><td>HASH</td><td>30 min sliding</td><td>login session</td></tr>
+            <tr><td class="mono">cart:{cartId}</td><td>HASH</td><td>7 days sliding</td><td>productId → quantity</td></tr>
+            <tr><td class="mono">cartmeta:{cartId}</td><td>HASH</td><td>7 days sliding</td><td>owner, version, timestamps</td></tr>
+            <tr><td class="mono">usercart:{customerId}</td><td>STRING</td><td>7 days sliding</td><td>customer → active cart</td></tr>
+            <tr><td class="mono">checkout:idem:{key}</td><td>STRING</td><td>24 h</td><td>duplicate checkout suppression</td></tr></table></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================ MONGODB -->
+  <section id="tab-mongo" class="hidden">
+    <div class="cols-4" id="m-collections" style="margin-bottom:16px"></div>
+    <div class="cols-2" style="grid-template-columns:minmax(0,1fr) minmax(0,1.2fr)">
+      <div>
+        <div class="panel">
+          <div class="panel-head"><h2>Query</h2><span class="badge mongo">find + explain</span></div>
+          <div class="cols-2"><div><label for="m-col">Collection</label><select id="m-col"><option>products</option><option>orders</option><option>outbox</option><option>projector_state</option></select></div>
+            <div><label for="m-limit">Limit</label><input id="m-limit" type="number" value="10" min="1" max="100"></div></div>
+          <div class="field"><label for="m-filter">Filter (JSON)</label><textarea id="m-filter">{"category.id": "footwear"}</textarea></div>
+          <div class="field"><label for="m-sort">Sort (JSON list of [field, 1|-1])</label><input id="m-sort" class="mono" value='[["price.amount", 1]]'></div>
+          <div class="row" style="margin-top:10px"><button id="m-run">Run query</button></div>
+          <div class="section-title">Preset queries (watch the plan change)</div>
+          <div id="m-presets" class="stack"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Same question, two databases</h2></div>
+          <p class="muted small" style="margin-top:-6px">"Customers who bought X also bought…" computed by a MongoDB aggregation over orders vs. the Neo4j 2-hop traversal. The counts must match; the Neo4j query states the relationship directly.</p>
+          <div class="row"><input id="cmp-product" value="p_104" class="mono"><button id="cmp-run">Compare</button></div>
+          <div id="cmp-out" style="margin-top:10px"></div>
+        </div>
+      </div>
+      <div>
+        <div class="panel"><div class="panel-head"><h2>Execution plan</h2><span id="m-shell" class="mono small muted"></span></div><div id="m-plan"><p class="muted">Run a query to see whether MongoDB used an index (IXSCAN) or scanned the collection (COLLSCAN).</p></div></div>
+        <div class="panel"><div class="panel-head"><h2>Documents</h2><span id="m-count" class="muted small"></span></div><div id="m-docs"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================ NEO4J -->
+  <section id="tab-neo4j" class="hidden">
+    <div class="cols-4" id="n-kpis" style="margin-bottom:16px"></div>
+    <div class="panel">
+      <div class="panel-head"><h2>Purchase graph around a product</h2>
+        <div class="row"><select id="n-product" style="width:240px"></select>
+          <label class="row" style="margin:0;gap:4px">buyers <input id="n-buyers" type="number" value="12" min="1" max="60" style="width:64px"></label>
+          <button id="n-draw">Draw</button></div></div>
+      <div class="legend"><span><i style="background:#e8590c"></i>selected product</span><span><i style="background:#1a6fb5"></i>other product</span>
+        <span><i style="background:#8a94a6"></i>customer</span><span>edge = PURCHASED (from MongoDB orders via the outbox)</span></div>
+      <div class="graph-box" style="margin-top:8px"><svg id="n-svg" viewBox="0 0 1000 520"></svg></div>
+    </div>
+    <div class="cols-2" style="grid-template-columns:minmax(0,1fr) minmax(0,1.1fr)">
+      <div class="panel">
+        <div class="panel-head"><h2>Cypher console (read-only)</h2></div>
+        <div id="n-presets" class="row wrap" style="margin-bottom:8px"></div>
+        <textarea id="n-query" style="min-height:170px"></textarea>
+        <div class="row" style="margin-top:8px"><button id="n-run">Run</button><span class="muted small">Runs in a READ transaction; write clauses are rejected.</span></div>
+      </div>
+      <div class="panel"><div class="panel-head"><h2>Result</h2><span class="muted small" id="n-meta"></span></div><div id="n-result" class="table-wrap" style="max-height:420px;overflow:auto"></div></div>
+    </div>
+    <div class="cols-2">
+      <div class="panel"><h3>Constraints</h3><div id="n-constraints" class="table-wrap" style="margin-top:8px"></div></div>
+      <div class="panel"><h3>Indexes</h3><div id="n-indexes" class="table-wrap" style="margin-top:8px"></div></div>
+    </div>
+  </section>
+</main>
+<script src="/static/common.js"></script>
+<script>
+renderNav('explorer');
+// ------------------------------------------------------------------ tabs
+const loaded = {};
+function showTab(name) {
+  $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  ['redis', 'mongo', 'neo4j'].forEach(n => $('#tab-' + n).classList.toggle('hidden', n !== name));
+  history.replaceState(null, '', '#' + name);
+  if (!loaded[name]) { loaded[name] = true; ({ redis: loadRedis, mongo: loadMongo, neo4j: loadNeo4j })[name](); }
+}
+$$('.tab').forEach(t => t.onclick = () => showTab(t.dataset.tab));
+
+// ------------------------------------------------------------------ Redis
+async function loadRedis() {
+  try {
+    const r = await api('/api/explorer/redis?pattern=' + encodeURIComponent($('#r-pattern').value || '*'));
+    const kp = Object.entries(r.by_pattern).map(([k, v]) => `${k}: ${v}`).join(' · ') || 'no keys yet';
+    $('#redis-kpis').innerHTML = `
+      <div class="kpi"><div class="label">Keys in DB 0</div><div class="value">${r.dbsize}</div><div class="sub">${esc(kp)}</div></div>
+      <div class="kpi"><div class="label">Memory used</div><div class="value">${esc(r.server.used_memory_human)}</div><div class="sub">in-memory store</div></div>
+      <div class="kpi"><div class="label">Version</div><div class="value">${esc(r.server.redis_version)}</div><div class="sub">AOF persistence ${r.server.aof_enabled ? 'on' : 'off'}</div></div>
+      <div class="kpi"><div class="label">Uptime</div><div class="value">${Math.round(r.server.uptime_in_seconds / 60)} min</div><div class="sub">${r.server.connected_clients} connected clients</div></div>`;
+    const now = Date.now();
+    $('#r-keys').innerHTML = '<tr><th>Key</th><th>Type</th><th class="num">TTL (s)</th></tr>' + r.keys.map(k => `
+      <tr class="click" data-key="${esc(k.key)}"><td class="mono small">${esc(k.key)}</td><td><span class="badge redis">${esc(k.type)}</span></td>
+      <td class="num ttl" data-ttl="${k.ttl}" data-at="${now}">${k.ttl}</td></tr>`).join('') +
+      (r.keys.length ? '' : '<tr><td colspan="3" class="muted">No keys match. Open the Shop page to create a cart and a session.</td></tr>');
+  } catch (e) { toast(e.message, 'error'); }
+}
+setInterval(() => $$('.ttl').forEach(el => {
+  const t = Number(el.dataset.ttl);
+  if (t > 0) el.textContent = Math.max(0, t - Math.round((Date.now() - Number(el.dataset.at)) / 1000));
+}), 1000);
+async function showKey(key) {
+  try {
+    const k = await api('/api/explorer/redis/key?key=' + encodeURIComponent(key));
+    $('#r-key-name').textContent = key;
+    if (!k.exists) { $('#r-value').innerHTML = '<div class="note warn">Key no longer exists (it expired or was deleted).</div>'; return; }
+    $('#r-value').innerHTML = `<dl class="kv"><dt>Type</dt><dd>${esc(k.type)}</dd><dt>TTL</dt><dd>${k.ttl} s${k.ttl > 0 ? ` (${(k.ttl / 3600).toFixed(2)} h)` : ''}</dd>
+      <dt>Memory</dt><dd>${k.memory_bytes} bytes</dd><dt>redis-cli</dt><dd class="mono">${k.cli.map(esc).join('<br>')}</dd></dl>
+      <div style="margin-top:10px">${jsonBlock(k.value)}</div>`;
+  } catch (e) { toast(e.message, 'error'); }
+}
+$('#r-scan').onclick = loadRedis;
+$('#r-run').onclick = async () => {
+  try { const r = await api('/api/explorer/redis/command', { method: 'POST', body: { command: $('#r-cmd').value } }); $('#r-cmd-out').innerHTML = jsonBlock(r.result); }
+  catch (e) { $('#r-cmd-out').innerHTML = `<div class="note bad">${esc(e.message)}</div>`; }
+};
+$('#r-cmd').onkeydown = e => { if (e.key === 'Enter') $('#r-run').click(); };
+
+// ------------------------------------------------------------------ MongoDB
+async function loadMongo() {
+  try {
+    const cols = await api('/api/explorer/mongo');
+    $('#m-collections').innerHTML = cols.map(c => `
+      <div class="kpi"><div class="row between"><b class="mono">${esc(c.name)}</b><span class="badge mongo">${c.count} docs</span></div>
+        <div class="sub">avg ${c.avg_doc_bytes ?? '—'} B/doc · ${c.size_bytes != null ? (c.size_bytes / 1024).toFixed(1) + ' KB' : ''}</div>
+        <div class="section-title" style="margin-top:8px">Indexes</div>
+        <div class="small mono">${c.indexes.map(i => `${esc(i.name)}${i.unique ? ' <span class="badge ok">unique</span>' : ''}<br><span class="muted">${esc(i.key.map(([k, v]) => k + ':' + v).join(', '))}</span>`).join('<br>')}</div>
+        ${c.validator ? `<details style="margin-top:8px"><summary class="small"><b>$jsonSchema validator</b></summary>${jsonBlock(c.validator)}</details>` : '<div class="sub" style="margin-top:8px">no validator (internal state)</div>'}
+      </div>`).join('');
+    const presets = await api('/api/explorer/mongo/presets', { quiet: true });
+    $('#m-presets').innerHTML = Object.entries(presets).map(([k, p]) => `
+      <div class="row between"><span class="small"><b>${esc(p.title)}</b><br><span class="mono muted">${esc(p.collection)}.find(${esc(JSON.stringify(p.filter))})</span></span>
+      <button class="secondary sm" data-preset="${esc(k)}">Run</button></div>`).join('');
+  } catch (e) { toast(e.message, 'error'); }
+}
+function drawFind(r) {
+  const p = r.plan;
+  $('#m-shell').textContent = r.shell;
+  $('#m-plan').innerHTML = (r.title ? `<h3 style="margin-bottom:8px">${esc(r.title)}</h3>` : '') + (p ? `
+    <div class="note ${p.collection_scan ? 'warn' : 'ok'}">${p.collection_scan
+      ? '<b>COLLSCAN</b> — no index serves this filter; MongoDB examined every document.'
+      : `<b>Index used:</b> ${esc(p.indexes.join(', ') || p.stages.join(', '))}`}</div>
+    <dl class="kv" style="margin-top:10px"><dt>Plan stages</dt><dd class="mono">${esc(p.stages.join(' ← '))}</dd>
+      <dt>Returned</dt><dd>${p.n_returned}</dd><dt>Index keys examined</dt><dd>${p.keys_examined}</dd>
+      <dt>Documents examined</dt><dd>${p.docs_examined}</dd><dt>Server time</dt><dd>${p.execution_ms} ms</dd></dl>` : '');
+  $('#m-count').textContent = `${r.documents.length} shown of ${r.total} matching · ${r.elapsed_ms} ms`;
+  $('#m-docs').innerHTML = r.documents.map(d => `<details class="trace-item"><summary><span class="mono small">${esc(d.id)}</span>
+    <span class="muted small">${esc(d.name || d.customer_id || d.type || '')}</span></summary>${jsonBlock(d)}</details>`).join('') || '<p class="muted">No documents.</p>';
+  const first = $('#m-docs details'); if (first) first.open = true;
+}
+$('#m-run').onclick = async () => {
+  let filter, sort;
+  try { filter = JSON.parse($('#m-filter').value || '{}'); sort = JSON.parse($('#m-sort').value || '[]'); }
+  catch (e) { return toast('Filter and sort must be valid JSON', 'error'); }
+  try { drawFind(await api('/api/explorer/mongo/find', { method: 'POST', body: { collection: $('#m-col').value, filter, sort, limit: Number($('#m-limit').value) || 10 } })); }
+  catch (e) { $('#m-plan').innerHTML = `<div class="note bad">${esc(e.message)}</div>`; }
+};
+$('#cmp-run').onclick = async () => {
+  const pid = $('#cmp-product').value.trim();
+  try {
+    const [m, g] = await Promise.all([api('/api/explorer/mongo/co-purchase/' + encodeURIComponent(pid)),
+      api('/api/explorer/neo4j/query', { method: 'POST', body: { query: CYPHER_PRESETS[0].q, params: { productId: pid } } })]);
+    const t0 = performance.now();
+    const gRows = g.rows.map(r => ({ product_id: r[0], shared_buyers: r[1] }));
+    const same = JSON.stringify(m.rows.slice(0, 5).map(r => r.shared_buyers)) === JSON.stringify(gRows.slice(0, 5).map(r => r.shared_buyers));
+    $('#cmp-out').innerHTML = `<div class="note ${same ? 'ok' : 'warn'}">${same ? 'Counts match: the graph projection agrees with the source-of-truth orders.' : 'Counts differ: the projection may still be catching up (check the dashboard backlog).'}</div>
+      <div class="cols-2" style="margin-top:10px">
+        <div><b>MongoDB aggregation</b> <span class="muted small">${m.elapsed_ms} ms · $unwind → $group → $unwind → $group</span>
+          <table class="small">${m.rows.map(r => `<tr><td class="mono">${esc(r.product_id)}</td><td class="num">${r.shared_buyers}</td></tr>`).join('')}</table></div>
+        <div><b>Neo4j traversal</b> <span class="muted small">${g.available_after_ms} ms · 2-hop MATCH</span>
+          <table class="small">${gRows.map(r => `<tr><td class="mono">${esc(r.product_id)}</td><td class="num">${r.shared_buyers}</td></tr>`).join('')}</table></div></div>`;
+  } catch (e) { $('#cmp-out').innerHTML = `<div class="note bad">${esc(e.message)}</div>`; }
+};
+
+// ------------------------------------------------------------------ Neo4j
+const CYPHER_PRESETS = [
+  { t: 'Co-purchase (baseline)', q: `MATCH (buyer:Customer)-[:PURCHASED]->(seed:Product {productId: $productId})
+MATCH (buyer)-[:PURCHASED]->(candidate:Product)
+WHERE candidate <> seed AND candidate.active = true
+WITH candidate, count(DISTINCT buyer) AS sharedBuyers
+RETURN candidate.productId AS productId, sharedBuyers
+ORDER BY sharedBuyers DESC, productId
+LIMIT 10`, p: { productId: 'p_104' } },
+  { t: 'Jaccard similarity', q: `MATCH (seed:Product {productId: $productId})<-[:PURCHASED]-(b:Customer)-[:PURCHASED]->(c:Product)
+WHERE c <> seed
+WITH seed, c, count(DISTINCT b) AS shared
+MATCH (seed)<-[:PURCHASED]-(sb:Customer) WITH seed, c, shared, count(DISTINCT sb) AS seedBuyers
+MATCH (c)<-[:PURCHASED]-(cb:Customer) WITH c, shared, seedBuyers, count(DISTINCT cb) AS candBuyers
+RETURN c.productId AS productId, shared, seedBuyers, candBuyers,
+       round(toFloat(shared) / (seedBuyers + candBuyers - shared), 3) AS jaccard
+ORDER BY jaccard DESC LIMIT 10`, p: { productId: 'p_104' } },
+  { t: 'Who bought it', q: `MATCH (c:Customer)-[r:PURCHASED]->(p:Product {productId: $productId})
+RETURN c.customerId AS customer, r.orderId AS orderId, r.quantity AS qty, r.purchasedAt AS purchasedAt
+ORDER BY purchasedAt DESC LIMIT 25`, p: { productId: 'p_104' } },
+  { t: 'Most-bought products', q: `MATCH (c:Customer)-[:PURCHASED]->(p:Product)
+RETURN p.productId AS productId, p.categoryId AS category, count(DISTINCT c) AS buyers
+ORDER BY buyers DESC LIMIT 15`, p: {} },
+  { t: 'Products per category', q: `MATCH (p:Product)-[:IN_CATEGORY]->(c:Category)
+RETURN c.categoryId AS category, c.name AS name, count(p) AS products, collect(p.productId)[0..6] AS sample
+ORDER BY products DESC`, p: {} },
+  { t: 'Duplicate-fact check', q: `// idempotency proof: each (eventId, productId) must appear exactly once
+MATCH ()-[r:PURCHASED]->()
+WITH r.eventId AS eventId, r.productId AS productId, count(*) AS copies
+WHERE copies > 1
+RETURN eventId, productId, copies`, p: {} },
+  { t: 'A customer\'s purchases', q: `MATCH (c:Customer {customerId: $customerId})-[r:PURCHASED]->(p:Product)
+RETURN p.productId AS productId, r.orderId AS orderId, r.eventId AS eventId, r.quantity AS qty
+ORDER BY r.purchasedAt DESC`, p: { customerId: 'c_0001' } },
+  { t: 'Two-hop paths', q: `MATCH path = (:Product {productId: $productId})<-[:PURCHASED]-(:Customer)-[:PURCHASED]->(:Product)
+RETURN path LIMIT 5`, p: { productId: 'p_104' } },
+];
+let currentParams = {};
+function setPreset(i) { $('#n-query').value = CYPHER_PRESETS[i].q; currentParams = { ...CYPHER_PRESETS[i].p }; $('#n-meta').textContent = 'params: ' + JSON.stringify(currentParams); }
+function cell(v) {
+  if (v && typeof v === 'object' && v._type === 'path') return `<span class="mono small">${v.nodes.map(n => esc(n.properties.productId || n.properties.customerId)).join(' — ')}</span>`;
+  if (v && typeof v === 'object') return `<span class="mono small">${esc(JSON.stringify(v))}</span>`;
+  return esc(v);
+}
+async function runCypher() {
+  try {
+    const r = await api('/api/explorer/neo4j/query', { method: 'POST', body: { query: $('#n-query').value, params: currentParams } });
+    $('#n-meta').textContent = `${r.rows.length} row(s) · ${r.available_after_ms} ms · params ${JSON.stringify(currentParams)}`;
+    $('#n-result').innerHTML = r.rows.length ? `<table><tr>${r.keys.map(k => `<th>${esc(k)}</th>`).join('')}</tr>${r.rows.map(row => `<tr>${row.map(v => `<td>${cell(v)}</td>`).join('')}</tr>`).join('')}</table>`
+      : '<div class="note ok">Query returned no rows.</div>';
+  } catch (e) { $('#n-result').innerHTML = `<div class="note bad">${esc(e.message)}</div>`; }
+}
+async function loadNeo4j() {
+  $('#n-presets').innerHTML = CYPHER_PRESETS.map((p, i) => `<button class="chip" data-cypher="${i}">${esc(p.t)}</button>`).join('');
+  setPreset(0);
+  runCypher();
+  try {
+    const s = await api('/api/explorer/neo4j');
+    const count = (arr, key, name) => (arr.find(x => x[key] === name) || {}).count || 0;
+    $('#n-kpis').innerHTML = `
+      <div class="kpi"><div class="label">Customer nodes</div><div class="value">${count(s.nodes, 'label', 'Customer')}</div><div class="sub">identity only, no PII</div></div>
+      <div class="kpi"><div class="label">Product nodes</div><div class="value">${count(s.nodes, 'label', 'Product')}</div><div class="sub">productId, categoryId, active</div></div>
+      <div class="kpi"><div class="label">PURCHASED edges</div><div class="value">${count(s.relationships, 'type', 'PURCHASED')}</div><div class="sub">one per order line, from the outbox</div></div>
+      <div class="kpi"><div class="label">Categories</div><div class="value">${count(s.nodes, 'label', 'Category')}</div><div class="sub">${count(s.relationships, 'type', 'IN_CATEGORY')} IN_CATEGORY edges</div></div>`;
+    const tbl = (rows, cols) => `<table><tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr>${rows.map(r => `<tr>${cols.map(c => `<td class="small">${esc(Array.isArray(r[c]) ? r[c].join(', ') : r[c])}</td>`).join('')}</tr>`).join('')}</table>`;
+    $('#n-constraints').innerHTML = tbl(s.constraints, ['name', 'type', 'labelsOrTypes', 'properties']);
+    $('#n-indexes').innerHTML = tbl(s.indexes, ['name', 'type', 'entityType', 'labelsOrTypes', 'properties', 'state']);
+    const products = await api('/api/products?limit=100&sort=name', { quiet: true });
+    $('#n-product').innerHTML = products.items.map(p => `<option value="${esc(p.id)}" ${p.id === 'p_104' ? 'selected' : ''}>${esc(p.name)} (${esc(p.id)})</option>`).join('');
+    drawGraph();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+// Small force-directed layout drawn as SVG (no external libraries).
+async function drawGraph() {
+  const pid = $('#n-product').value;
+  const svg = $('#n-svg');
+  try {
+    const d = await api(`/api/explorer/neo4j/neighborhood/${encodeURIComponent(pid)}?buyers=${$('#n-buyers').value || 12}`);
+    const nodes = new Map(), links = [];
+    const add = (id, kind, label) => { if (!nodes.has(id)) nodes.set(id, { id, kind, label, x: 500 + (Math.random() - .5) * 600, y: 260 + (Math.random() - .5) * 380, vx: 0, vy: 0 }); return nodes.get(id); };
+    add('p:' + pid, 'seed', d.products[pid]?.name || pid);
+    d.rows.forEach(r => {
+      const c = add('c:' + r.customer, 'customer', r.customer);
+      const p = add('p:' + r.product, r.product === pid ? 'seed' : 'product', d.products[r.product]?.name || r.product);
+      links.push({ s: c, t: p, n: r.times });
+    });
+    const list = [...nodes.values()];
+    // Radial layout: product in the centre, its buyers on the inner ring (hop 1),
+    // everything those buyers also bought on the outer ring (hop 2).
+    const seed = nodes.get('p:' + pid);
+    const customers = list.filter(n => n.kind === 'customer');
+    const degree = new Map();
+    links.forEach(l => { if (l.t !== seed) degree.set(l.t, (degree.get(l.t) || 0) + 1); });
+    const others = list.filter(n => n.kind === 'product').sort((a, b) => (degree.get(b) || 0) - (degree.get(a) || 0));
+    seed.x = 500; seed.y = 260;
+    const ring = (arr, rx, ry, offset) => arr.forEach((n, i) => {
+      const a = offset + (2 * Math.PI * i) / Math.max(arr.length, 1);
+      n.x = 500 + rx * Math.cos(a); n.y = 260 + ry * Math.sin(a);
+    });
+    ring(customers, 200, 120, -Math.PI / 2);
+    ring(others, 420, 215, -Math.PI / 2 + Math.PI / Math.max(others.length, 1));
+    const color = { seed: '#e8590c', product: '#1a6fb5', customer: '#8a94a6' };
+    svg.innerHTML = `<g stroke="#9fb0c8" stroke-opacity=".7">${links.map(l => `<line x1="${l.s.x}" y1="${l.s.y}" x2="${l.t.x}" y2="${l.t.y}" stroke-width="${Math.min(4, l.n)}"/>`).join('')}</g>` +
+      list.map(n => n.kind === 'customer'
+        ? `<g><rect x="${n.x - 7}" y="${n.y - 7}" width="14" height="14" rx="3" fill="${color.customer}"><title>Customer ${esc(n.label)}</title></rect>
+            <text x="${n.x}" y="${n.y + 20}" font-size="10" text-anchor="middle" fill="#5d6a7c">${esc(n.label)}</text></g>`
+        : `<g><circle cx="${n.x}" cy="${n.y}" r="${n.kind === 'seed' ? 17 : 12}" fill="${color[n.kind]}" stroke="#fff" stroke-width="2"><title>${esc(n.label)}</title></circle>
+            <text x="${n.x}" y="${n.y - (n.kind === 'seed' ? 23 : 17)}" font-size="${n.kind === 'seed' ? 13 : 11.5}" font-weight="650" text-anchor="middle" fill="#172233">${esc(n.label)}</text></g>`).join('') +
+      (d.rows.length ? '' : `<text x="500" y="260" text-anchor="middle" fill="#5d6a7c">No purchases of this product in the graph yet.</text>`);
+  } catch (e) { svg.innerHTML = `<text x="500" y="260" text-anchor="middle" fill="#b42318">${esc(e.message)}</text>`; }
+}
+$('#n-draw').onclick = drawGraph;
+$('#n-product').onchange = drawGraph;
+$('#n-run').onclick = runCypher;
+
+document.addEventListener('click', e => {
+  const btn = e.target.closest('button'); const row = e.target.closest('tr.click');
+  if (row?.dataset.key) showKey(row.dataset.key);
+  if (!btn) return;
+  const d = btn.dataset;
+  if (d.pattern) { $('#r-pattern').value = d.pattern; loadRedis(); }
+  if (d.preset) api('/api/explorer/mongo/presets/' + d.preset).then(drawFind).catch(err => toast(err.message, 'error'));
+  if (d.cypher !== undefined) { setPreset(Number(d.cypher)); runCypher(); }
+});
+showTab(['redis', 'mongo', 'neo4j'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'redis');
+</script>
+</body>
+</html>

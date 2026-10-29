@@ -1,0 +1,38 @@
+﻿{
+    "catch_up_seconds_after_restart":  21.4,
+    "orders":  [
+                   "ord_9383b701c472",
+                   "ord_3566f38a2818",
+                   "ord_1e56b55841b2"
+               ],
+    "final":  {
+                  "counts":  {
+                                 "PENDING":  0,
+                                 "PROCESSING":  0,
+                                 "PROCESSED":  277,
+                                 "DEAD":  0
+                             },
+                  "backlog":  0,
+                  "oldest_pending_age_s":  0.0,
+                  "recent_lag_avg_s":  4.809,
+                  "recent_lag_p95_s":  29.365,
+                  "lag_target_s":  5,
+                  "updating":  false,
+                  "worker":  {
+                                 "failed_total":  26,
+                                 "processed_total":  291,
+                                 "heartbeat_at":  "2026-10-21T17:49:08.491000+00:00",
+                                 "last_batch":  {
+                                                    "claimed":  0,
+                                                    "processed":  0,
+                                                    "failed":  0,
+                                                    "dead":  0,
+                                                    "error":  null
+                                                },
+                                 "last_error":  null,
+                                 "worker_id":  "6461b4c356b9",
+                                 "id":  "projector",
+                                 "heartbeat_age_s":  1.0
+                             }
+              }
+}

@@ -1,0 +1,124 @@
+{
+  "base_url": "http://localhost:8000",
+  "started_at": "2026-10-21 17:37:25",
+  "cart_mixed_c10": {
+    "requests": 1000,
+    "concurrency": 10,
+    "errors": 0,
+    "throughput_rps": 238.8,
+    "p50_ms": 41.23,
+    "p95_ms": 63.88,
+    "target_p95_ms": 100,
+    "meets_target": true
+  },
+  "cart_mixed_c50": {
+    "requests": 1000,
+    "concurrency": 50,
+    "errors": 0,
+    "throughput_rps": 169.3,
+    "p50_ms": 271.08,
+    "p95_ms": 448.62,
+    "target_p95_ms": 100,
+    "meets_target": false
+  },
+  "catalog_mixed_c10": {
+    "requests": 500,
+    "concurrency": 10,
+    "errors": 0,
+    "throughput_rps": 322.0,
+    "p50_ms": 30.13,
+    "p95_ms": 47.47,
+    "target_p95_ms": 300,
+    "meets_target": true
+  },
+  "recommendation_c10": {
+    "requests": 300,
+    "concurrency": 10,
+    "errors": 0,
+    "throughput_rps": 51.3,
+    "p50_ms": 188.02,
+    "p95_ms": 262.97,
+    "target_p95_ms": 500,
+    "meets_target": true
+  },
+  "checkout_idempotency": {
+    "concurrent_requests": 10,
+    "status_codes": {
+      "201": 1,
+      "409": 9
+    },
+    "orders_with_key": 1,
+    "outbox_events_for_order": 1,
+    "graph_purchase_facts": 2,
+    "expected_facts": 2,
+    "pass": true
+  },
+  "recommendation_correctness": {
+    "products_checked": 20,
+    "exact_matches": 20,
+    "pass": true
+  },
+  "recommendation_quality": {
+    "coverage": 1.0,
+    "active_products": 26,
+    "holdout_split": "first 80% of orders by time train, last 20% test",
+    "hit_rate_at_5": 0.848,
+    "precision_at_5": 0.246,
+    "trials": 105
+  },
+  "schema_evolution": {
+    "change": "add laptops.attributes.ramGb and footwear.attributes.waterproof",
+    "laptops_modified": 2,
+    "footwear_modified": 0,
+    "other_documents_modified": 0,
+    "migration_needed": false,
+    "graph_rewrite_needed": false,
+    "pass": true
+  },
+  "polyglot_overhead": {
+    "containers": [
+      "redis",
+      "mongo",
+      "mongo-init",
+      "neo4j",
+      "seed",
+      "app",
+      "worker",
+      "mongo-express",
+      "redis-commander"
+    ],
+    "databases_to_operate": 3,
+    "cross_store_calls_per_checkout": "Redis 4-6 + MongoDB 3-4 (1 transaction)",
+    "async_boundary": "MongoDB outbox -> Neo4j projector (eventual, target <= 5 s)",
+    "projection_lag": {
+      "counts": {
+        "PENDING": 0,
+        "PROCESSING": 0,
+        "PROCESSED": 268,
+        "DEAD": 0
+      },
+      "backlog": 0,
+      "oldest_pending_age_s": 0.0,
+      "recent_lag_avg_s": 1.712,
+      "recent_lag_p95_s": 1.742,
+      "lag_target_s": 5,
+      "updating": false,
+      "worker": {
+        "failed_total": 2,
+        "processed_total": 282,
+        "heartbeat_at": "2026-10-21T17:37:43.906000+00:00",
+        "last_batch": {
+          "claimed": 0,
+          "processed": 0,
+          "failed": 0,
+          "dead": 0,
+          "error": null
+        },
+        "last_error": null,
+        "worker_id": "859b1c28b1c9",
+        "id": "projector",
+        "heartbeat_age_s": 0.3
+      }
+    }
+  }
+}
